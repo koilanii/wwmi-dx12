@@ -2445,9 +2445,9 @@ unsigned long long DispatchCalls()
 
 static std::mutex g_retire_mtx;
 static std::vector<RetiredBuf> g_retired_res; // wrapper resources whose last reference dropped
-static std::atomic<void (*)(ID3D12Resource* res)> g_retire_observer{ nullptr };
+static std::atomic<bool (*)(ID3D12Resource* res)> g_retire_observer{ nullptr };
 
-void SetRetireObserver(void (*fn)(ID3D12Resource* res))
+void SetRetireObserver(bool (*fn)(ID3D12Resource* res))
 {
     g_retire_observer.store(fn, std::memory_order_release);
 }
@@ -2466,7 +2466,12 @@ void NoteTextureUse(ID3D11Resource* res)
 void RetireDx12Resource(ID3D12Resource* res)
 {
     if (!res) return;
-    if (auto fn = g_retire_observer.load(std::memory_order_acquire)) fn(res);
+    if (auto fn = g_retire_observer.load(std::memory_order_acquire); fn && fn(res)) return;
+    ReleaseAfterGpu(res);
+}
+
+void ReleaseAfterGpu(ID3D12Resource* res)
+{
     std::lock_guard<std::mutex> l(g_retire_mtx);
     g_retired_res.push_back({ res, GpuStamp() });
 }

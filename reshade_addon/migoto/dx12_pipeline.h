@@ -144,7 +144,9 @@ unsigned long long DispatchCalls();
 void UploadFrameTick();
 // Released by UploadFrameTick once the GPU has passed its last use.
 void RetireDx12Resource(ID3D12Resource* res);
-void SetRetireObserver(void (*fn)(ID3D12Resource* res)); // told of each, on the thread whose release it was
+void ReleaseAfterGpu(ID3D12Resource* res); // takes a native reference, without notifying the observer
+// Return true to take the retiring reference and call ReleaseAfterGpu after descriptor cleanup.
+void SetRetireObserver(bool (*fn)(ID3D12Resource* res));
 void SetTextureUseObserver(void (*fn)(ID3D12Resource* res)); // a 2D texture bound for one of our draws or dispatches
 void NoteTextureUse(ID3D11Resource* res); // ... or a texture a mod's list assigns to a slot
 

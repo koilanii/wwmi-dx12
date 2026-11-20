@@ -64,12 +64,14 @@ PortApi::LoadedTexture Take(PortApi::LoadedTexture& t)
 }
 } // namespace
 
-void TexReplace::OnRetire(ID3D12Resource* res)
+bool TexReplace::OnRetire(ID3D12Resource* res)
 {
-    if (!res || res->GetDesc().Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) return;
-    const bool keyed = g_mod_textures.IndexOf(res) >= 0;
+    if (!res || res->GetDesc().Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) return false;
     std::lock_guard l(g_tex_replace.dying_mtx_);
-    if (g_tex_replace.watched_.erase(res) || keyed) g_tex_replace.dying_.insert(res);
+    if (g_tex_replace.retire_stopped_) return false;
+    if (!g_tex_replace.watched_.erase(res) && g_mod_textures.IndexOf(res) < 0) return false;
+    // One native reference stays with the descriptor sweep; any further references retire normally.
+    return g_tex_replace.dying_.insert(res).second;
 }
 
 void TexReplace::Quarantine(D3D12_CPU_DESCRIPTOR_HANDLE srv, unsigned epoch)
@@ -92,10 +94,24 @@ void TexReplace::ClearForParse()
     for (const ModTextureStore::Resource& r : g_mod_textures.Resources())
         if (r.valid && r.res) held.push_back(r.res);
     unsigned taken_out = 0;
-    for (ID3D12Resource* res : held) taken_out += Forget(res);
+    unsigned later = 0;
+    {
+        std::lock_guard l(dying_mtx_);
+        for (ID3D12Resource* res : held) {
+            if (!Forget(res)) continue;
+            ++taken_out;
+            // A worker or an old mod set can outlive the parse. OnRetire must still recognize
+            // the texture after this lookup key is gone.
+            if (!dying_.count(res)) {
+                watched_.insert(res);
+                ++later;
+            }
+        }
+    }
     g_mod_textures.ClearForParse();
     if (taken_out)
-        logger::write("TEXSTORE: parse -- %u texture(s) taken out of the store, their SRV slots quarantined", taken_out);
+        logger::write("TEXSTORE: parse -- %u texture(s) removed, %u already pending descriptor cleanup, "
+                      "%u watched for later wrapper release", taken_out, taken_out - later, later);
 }
 
 void TexReplace::SweepDying()
@@ -116,6 +132,8 @@ void TexReplace::SweepDying()
         replaced_.erase(it);
     }
     const StampTally t = g_stamps.UnstampDying(dying);
+    // Start the GPU grace period after the last tracked descriptor has been handed back.
+    for (ID3D12Resource* res : dying) MigotoPort::ReleaseAfterGpu(res);
     if (watch_.replaced) Add(watch_.late, t);
     if (forgotten || t.restored || t.nulled || t.raced)
         logger::write(
@@ -616,6 +634,13 @@ void TexReplace::Tick(ID3D12CommandQueue* queue)
 void TexReplace::Stop()
 {
     MigotoPort::SetRetireObserver(nullptr);
+    {
+        std::lock_guard l(dying_mtx_);
+        retire_stopped_ = true;
+        for (ID3D12Resource* res : dying_) MigotoPort::ReleaseAfterGpu(res);
+        dying_.clear();
+        watched_.clear();
+    }
     {
         std::lock_guard l(mtx_);
         stop_ = true;

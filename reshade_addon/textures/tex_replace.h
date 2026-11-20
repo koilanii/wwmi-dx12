@@ -103,7 +103,7 @@ private:
         unsigned epoch;
         uint32_t frame;
     };
-    static void OnRetire(ID3D12Resource* res);
+    static bool OnRetire(ID3D12Resource* res);
     void Run();
     void SweepDying();
     void StartPass(Pass p);
@@ -137,8 +137,9 @@ private:
     std::vector<QuarantinedSrv> quarantine_;
 
     std::mutex dying_mtx_;
-    std::unordered_set<ID3D12Resource*> watched_; // under dying_mtx_: swapped out, their store key already gone
-    std::unordered_set<ID3D12Resource*> dying_; // under dying_mtx_: mod textures whose last wrapper reference dropped
+    bool retire_stopped_ = false; // under dying_mtx_, also checked by callbacks already in flight
+    std::unordered_set<ID3D12Resource*> watched_; // under dying_mtx_: removed from the store, wrapper release still pending
+    std::unordered_set<ID3D12Resource*> dying_; // under dying_mtx_: one native reference per pending descriptor sweep
 
     std::mutex mtx_; // the worker's side
     std::condition_variable cv_;
